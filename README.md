@@ -24,10 +24,10 @@ With 18 months of data (January 2020 – June 2021), this study develops a **two
 
 The 2-FB framework integrates **deterministic** and **stochastic** efficiency modeling:
 
-| Stage | Method | Level | Output | Key Adjustment |
-|--------|---------|--------|----------|----------------|
-| 1 | Data Envelopment Analysis (DEA) | Country | Monthly national efficiency scores | Input-output frontier |
-| 2 | Stochastic Frontier Analysis (SFA) | HHS | Hospital-level efficiency estimates | Adjusted for national DEA scores & stringency index |
+| Stage | Method | Level | Output | 
+|--------|---------|--------|----------|
+| 1 | Data Envelopment Analysis (DEA) | Country | Monthly national efficiency scores | 
+| 2 | Stochastic Frontier Analysis (SFA) | HHS | Hospital-level efficiency estimates | 
 
 ---
 
