@@ -1,0 +1,1235 @@
+---
+title: "SFA_Pipeline_Paper"
+author: "Sean Lam"
+date: "2025-10-20"
+output: html_document
+---
+
+```{r setup}
+library(dplyr)
+library(tidyr) 
+library(tidyverse)
+library(stringr)
+library(lubridate)
+library(readxl)
+library(ggplot2)
+library(scales)
+library(plm)
+library(frontier)
+library(officer)
+library(flextable)
+library(corrplot)
+library(MASS)
+library(data.table)
+library(purrr)
+```
+```{r}
+
+```
+
+```{r}
+output_data_path <- "E:/Local_Dropbox/NUS Dropbox/Shao Wei, Sean Lam/Global Surgery-WS4/5. Hospital Level Study/Wrangling/Sean_Cleaned/Output"
+
+other_data_path <- "E:/Local_Dropbox/NUS Dropbox/Shao Wei, Sean Lam/Global Surgery-WS4/5. Hospital Level Study/Raw_Data"
+df_data <- read.csv(file.path(other_data_path, "Stage2_inst_data.csv"))
+
+selected_inst <- c('HCTM', 'RIMS', 'SGH', 'ULin', 'UMMC', 'GNRC', 'FJMU','USU')
+colnames(df_data) <- sub("^ï..", "", colnames(df_data))
+df_data <- df_data[df_data$Institution %in% selected_inst, ]
+```
+
+1. Add 1 to any 0 values in the inputs following Battese (1997)
+
+```{r}
+columns_to_adjust <- c("COVID.beds.in.Use", "DoctorCOVIDDeployed", 
+                       "NurseCOVIDDeployed", "EmergencyVolume", 
+                       "ElectiveVolume")
+df_data %>%
+  summarise(across(all_of(columns_to_adjust), list(mean = ~mean(.x, na.rm = TRUE), 
+                                           sd = ~sd(.x, na.rm = TRUE),
+                                           median = ~median(.x, na.rm = TRUE),
+                                           min = ~min(.x, na.rm = TRUE),
+                                           max = ~max(.x, na.rm = TRUE))))
+
+for(col in columns_to_adjust) {
+  df_data[[col]] <- ifelse(df_data[[col]] == 0, 1, df_data[[col]])
+}
+
+df_data %>%
+  summarise(across(all_of(columns_to_adjust), list(mean = ~mean(.x, na.rm = TRUE), 
+                                           sd = ~sd(.x, na.rm = TRUE),
+                                           median = ~median(.x, na.rm = TRUE),
+                                           min = ~min(.x, na.rm = TRUE),
+                                           max = ~max(.x, na.rm = TRUE))))
+
+```
+
+2. Normalize variables
+
+```{r}
+df_data$NormCOVIDBedsUse <- df_data$COVID.beds.in.Use / df_data$Bed.capacity
+
+df_data$NormDoctorCOVIDDeployed <- df_data$DoctorCOVIDDeployed / df_data$Bed.capacity
+df_data$NormNurseCOVIDDeployed <- df_data$NurseCOVIDDeployed / df_data$Bed.capacity
+df_data$NormClinCOVIDDeployed <- (df_data$NurseCOVIDDeployed+df_data$DoctorCOVIDDeployed) / df_data$Bed.capacity
+
+df_data$NormEmergencyVolume <- df_data$EmergencyVolume / df_data$Bed.capacity
+df_data$NormElectiveVolume <- df_data$ElectiveVolume / df_data$Bed.capacity
+df_data$NormSurgVolume <- (df_data$ElectiveVolume+df_data$EmergencyVolume) / df_data$Bed.capacity
+
+```
+
+
+3. Derive Cumulative and Marginal Responses
+
+```{r}
+df_data <- df_data %>%
+  group_by(Institution) %>%
+  arrange(Month) %>%  
+  mutate(cum_admissions = cumsum(COVID_admissions),
+         cum_deaths = cumsum(COVID_deaths)) %>%
+  ungroup()
+
+df_data$Cumulative.Response <- ifelse(df_data$cum_admissions != 0, 
+                                      1 - df_data$cum_deaths / df_data$cum_admissions, 
+                                      1)
+
+df_data$Marginal.Response <- ifelse(df_data$COVID_admissions != 0, 
+                                    1 - df_data$COVID_deaths / df_data$COVID_admissions, 
+                                    1)
+
+```
+
+
+4. Bring in Response Indexes
+
+```{r RI Wrangling}
+ri_path <- "E:/Local_Dropbox/NUS Dropbox/Shao Wei, Sean Lam/Global Surgery-WS4/9. COVID Measure Cutoff Study/Pipeline/11. Results"
+
+df_ri <- read.csv(file.path(ri_path,"selected_HRI_CRI.csv"))
+
+cols_to_pivot <- c('C5_Close_public_transport', 'C6_Stay_at_home_requirements', 'C7_Restrictions_on_internal_movement',                    'C8_International.travel.controls', 'H1_Public.information.campaigns', 'H2_Testing.policy_x', 
+                   'H3_Contact.tracing', 'H8_Protection.of.elderly.people', 'C3_Restrictions.on.visiting', 
+                   'C4_Restrictions.on.internal.movement', 'C5_Perimeter.screening', 'C6_Active.screening', 
+                   'C7_Visitor.controls', 'M1_Disposition', 'M2_Manpower.vaccination.rates..1.dose.', 
+                   'M3_Manpower.vaccination.rates..2.doses.', 'M4_Workplace.closing', 'H1_Routine.instructions', 
+                   'H2_Testing.policy_y', 'H3_Temperature.monitoring', 'H4_Splitting.surgical.teams', 
+                   'H5_Surgery.Postponement', 'H6_Personal.Protective.Equipment.requirements')
+
+df_ri_long <- reshape2::melt(df_ri, id.vars = c('Name', 'Date', 'Year.Month'), 
+                   measure.vars = cols_to_pivot, 
+                   variable.name = 'Policy', 
+                   value.name = 'Value')
+```
+
+5. Set up the versions of REsponse Indexes
+
+```{r}
+########################
+# Original Set
+########################
+# hgp_3 <- c('M1_Disposition', 'M2_Manpower.vaccination.rates..1.dose.', 'M3_Manpower.vaccination.rates..2.doses.', 'M4_Workplace.closing')
+# hgp_4 <- c('H1_Routine.instructions', 'H2_Testing.policy_y', 'H3_Temperature.monitoring')
+# hgp_5 <- c('H4_Splitting.surgical.teams', 'H5_Surgery.Postponement', 'H6_Personal.Protective.Equipment.requirements')
+
+########################
+# Version 6
+########################
+# Combined hgp_1 and hgp_2 - crowd control policies
+hgp_1_2 <- c('C3_Restrictions.on.visiting', 'C4_Restrictions.on.internal.movement', 'C7_Visitor.controls', 'C5_Perimeter.screening', 'C6_Active.screening')
+hgp_3 <- c('M4_Workplace.closing')
+hgp_4 <- c('H1_Routine.instructions', 'H3_Temperature.monitoring', 'H6_Personal.Protective.Equipment.requirements')
+hgp_5 <- c('H4_Splitting.surgical.teams', 'H5_Surgery.Postponement' )
+hgp_6 <- c('M3_Manpower.vaccination.rates..2.doses.')
+
+# Define cgp vector
+cgp <- c('C5_Close_public_transport', 'C6_Stay_at_home_requirements', 'C7_Restrictions_on_internal_movement', 'C8_International.travel.controls', 'H1_Public.information.campaigns', 'H2_Testing.policy_x',
+                   'H3_Contact.tracing', 'H8_Protection.of.elderly.people')
+# cgp_1<-c('C5_Close_public_transport', 'C6_Stay_at_home_requirements', 'C7_Restrictions_on_internal_movement','C8_International.travel.controls')
+# cgp_2<-c('H1_Public.information.campaigns','H2_Testing.policy_x', 
+#                    'H3_Contact.tracing', 'H8_Protection.of.elderly.people')
+
+label_policy <- function(policy) {
+  if (policy %in% hgp_1_2) {
+    return('HRI.1') # GP1n2
+  } else if (policy %in% hgp_3) {
+    return('HRI.2') #GP3
+  } else if (policy %in% hgp_4) {
+    return('HRI.3') #GP4
+  } else if (policy %in% hgp_5) {
+    return('HRI.4') #GP5
+  } else if (policy %in% hgp_6) {
+    return('HRI.5') #GP5
+  } else if (policy %in% cgp) {
+    return('CRI.1')
+  } else {
+    return('Other')
+  }
+}
+
+df_ri_long$Group <- factor(sapply(df_ri_long$Policy, label_policy))
+
+year_mth_order <- c('Jan-20', 'Feb-20', 'Mar-20', 'Apr-20', 'May-20', 'Jun-20',
+                    'Jul-20', 'Aug-20', 'Sep-20', 'Oct-20', 'Nov-20', 'Dec-20',
+                    'Jan-21', 'Feb-21', 'Mar-21', 'Apr-21', 'May-21', 'Jun-21',
+                    'Jul-21', 'Aug-21', 'Sep-21', 'Oct-21', 'Nov-21', 'Dec-21')
+
+df_ri_long$Year.Month <- factor(df_ri_long$Year.Month, levels = year_mth_order, ordered = TRUE)
+df_ri_long$Month.No <- as.integer(df_ri_long$Year.Month)
+
+```
+
+
+6. Add `10` to all Response Indexes to avoid log of `0`. This is by definition for Response Indexes to facilitate Cobb-Douglas implementation
+
+```{r}
+# Add a constant 10 to the RIs
+df_ri_long$Value <- df_ri_long$Value + 10
+max_ri <- max(df_ri_long$Value)
+```
+
+7. Derive summary statistics of RI indexes for Regression Model
+
+```{r}
+q1 <- function(x) { quantile(x, 0.25, na.rm = TRUE) }
+q3 <- function(x) { quantile(x, 0.75, na.rm = TRUE) }
+
+df_wide <- df_ri_long %>%
+  group_by(Name, Date, Year.Month, Month.No, Group) %>%
+  summarise(Mean = mean(Value, na.rm = TRUE),
+            Median = median(Value, na.rm = TRUE),
+            Min = min(Value, na.rm = TRUE),
+            Max = max(Value, na.rm = TRUE),
+            Q1 = q1(Value),
+            Q3 = q3(Value)) %>%
+  pivot_wider(names_from = Group, values_from = c(Mean, Median, Min, Max, Q1, Q3)) %>%
+  ungroup()
+```
+
+8. Bring in National Efficiency as a potential `inefficiency` factor
+
+```{r}
+country_to_institutions <- list(
+  "Pakistan" = c("FJMU"),  
+  "India" = c("GNRC", "RIMS"),
+  "Malaysia" = c("HCTM", "UMMC"),
+  "Singapore" = c("SGH"),
+  "Indonesia" = c("ULin", "USU")
+)
+
+NatEff_path <- "E:/Local_Dropbox/NUS Dropbox/Shao Wei, Sean Lam/Global Surgery-WS4/4. National Level Study/GY national level analysis/Updated national level study/SFA paper"
+df_nateff <- read.csv(file.path(NatEff_path,"Stage 1 result_24mon_22Jan.csv"))
+df_nateff <- dplyr::select(df_nateff, Country, Date, e.eff)
+
+df_nateff$Date <- as.Date(df_nateff$Date, format = "%Y-%m-%d")
+df_nateff <- df_nateff %>%
+  arrange(Country, Date) %>%  # Sort by Country and then Date
+  group_by(Country) %>%
+  mutate(Month.No = row_number()) %>% 
+  ungroup()
+
+df_nateff <- df_nateff %>%
+  mutate(Institution = map(Country, ~ country_to_institutions[[.x]] %||% NA_character_))%>%
+  unnest(Institution)
+
+df_nateff$Date <- NULL
+unique(df_nateff$Country)
+
+merged_df <- merge(df_wide, df_data, by.x = c("Name", "Month.No"), by.y = c("Institution", "Month"))
+
+merged_df <- merge(merged_df, df_nateff, by.x = c("Name", "Month.No"), by.y = c("Institution", "Month.No"))
+
+merged_df <- rename(merged_df, national_efficiency = e.eff)
+
+var_set3 <- c("Name","Date","Month.No","national_efficiency",
+              "Mean_CRI.1",
+              "Mean_HRI.1","Mean_HRI.2","Mean_HRI.3", 
+              "Mean_HRI.4","Mean_HRI.5",
+              "Median_CRI.1",
+              "Median_HRI.1","Median_HRI.2","Median_HRI.3", 
+              "Median_HRI.4","Median_HRI.5",
+              "NormCOVIDBedsUse","NormDoctorCOVIDDeployed","NormNurseCOVIDDeployed","NormClinCOVIDDeployed",
+              "NormEmergencyVolume","NormElectiveVolume","NormSurgVolume","Cumulative.Response","Marginal.Response" )
+colnames(merged_df)
+df_panel_sel <- merged_df[,var_set3]
+df_panel_sel$Date <- as.Date(df_panel_sel$Date, format="%Y-%m-%d")
+rows_with_na <- df_panel_sel %>% filter_all(any_vars(is.na(.)))
+
+df_panel_sel <- df_panel_sel[complete.cases(df_panel_sel), ]
+```
+
+9. Derive the Lagged Columns for the Cumulative Response
+
+```{r}
+df_panel_sel <- df_panel_sel %>%
+  arrange(Name, Date) %>%  
+  group_by(Name) %>%       
+  mutate(Cumulative.Response.lagged_1 = shift(Cumulative.Response, type = "lead", n=1, fill = NA)) %>%       
+  mutate(Cumulative.Response.lagged_2 = shift(Cumulative.Response, type = "lead", n=2, fill = NA)) %>% 
+  mutate(Cumulative.Response.lagged_3 = shift(Cumulative.Response, type = "lead", n=3, fill = NA)) %>% 
+  mutate(Marginal.Response.lagged_1 = shift(Marginal.Response, type = "lead", n=1, fill = NA)) %>%
+  mutate(Marginal.Response.lagged_2 = shift(Marginal.Response, type = "lead", n=2, fill = NA)) %>%
+  mutate(Marginal.Response.lagged_3 = shift(Marginal.Response, type = "lead", n=3, fill = NA)) 
+df_panel_sel$Month.No <- as.integer(df_panel_sel$Month.No)
+
+```
+
+10. Visualize the RI summary indexes to understand the directions of effects
+
+```{r}
+df_panel_temp<-df_panel_sel[c("Name","Date","Month.No","Median_HRI.1","Median_HRI.2","Median_HRI.3", 
+                                                "Median_HRI.4", "Median_HRI.5")]#
+df_long_temp <- pivot_longer(df_panel_temp, cols = c("Median_HRI.1","Median_HRI.2","Median_HRI.3", 
+                                                "Median_HRI.4", "Median_HRI.5"), 
+                        names_to = "HRI_Type", values_to = "Median_HRI_Value")
+ggplot(df_long_temp, aes(x = Month.No, y = Median_HRI_Value, color = HRI_Type)) +
+  geom_line() + # or geom_point() depending on your preference for visualization
+  facet_wrap(~Name, scales = "free_y") + # Use facet_grid if you prefer a different layout
+  theme_minimal() +
+  labs(title = "HRI Type Across Months for Each Name Category",
+       x = "Month",
+       y = "Median HRI Value",
+       color = "HRI Type") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+```
+
+11. Derive the Moving Average of all the explanatory variables for 3 dataframes for MA 1,2,3
+
+```{r}
+library(zoo)
+# df_panel_sel$Mean_CRI.1_BMA <- rollapply(df_panel_sel$Mean_CRI.1, 3, mean, partial = TRUE, align = 'right')
+
+var_set_MA <- c("national_efficiency","Mean_CRI.1","Mean_HRI.1","Mean_HRI.2","Mean_HRI.3", 
+              "Mean_HRI.4","Mean_HRI.5",
+              "Median_CRI.1","Median_HRI.1","Median_HRI.2","Median_HRI.3", 
+              "Median_HRI.4","Median_HRI.5",
+              "NormCOVIDBedsUse","NormDoctorCOVIDDeployed","NormNurseCOVIDDeployed","NormClinCOVIDDeployed",
+              "NormEmergencyVolume","NormElectiveVolume","NormSurgVolume")
+
+apply_MA_rolling_mean <- function(df, var_set, window_size) {
+  for (var in var_set) {
+    if (var %in% names(df)) {
+      df[[paste0("MA_", window_size, "_",var )]] <- rollapply(df[[var]], window_size, mean, partial = TRUE, align = 'right')
+    } else {
+      cat("Column", var, "not found in dataframe\n")
+    }
+  }
+  return(df)
+}
+
+df_panel_sel <- apply_MA_rolling_mean(df_panel_sel, var_set_MA, 1)
+df_panel_sel <- apply_MA_rolling_mean(df_panel_sel, var_set_MA, 2)
+df_panel_sel <- apply_MA_rolling_mean(df_panel_sel, var_set_MA, 3)
+columns_to_prefix <- c("national_efficiency", "Mean_CRI.1", "Mean_HRI.1", "Mean_HRI.2", "Mean_HRI.3", "Mean_HRI.4",
+                       "Mean_HRI.5", "Median_CRI.1", "Median_HRI.1", "Median_HRI.2", "Median_HRI.3", "Median_HRI.4",
+                       "Median_HRI.5", "NormCOVIDBedsUse", "NormDoctorCOVIDDeployed", "NormNurseCOVIDDeployed",
+                       "NormClinCOVIDDeployed", "NormEmergencyVolume", "NormElectiveVolume", "NormSurgVolume")
+
+new_column_names <- ifelse(names(df_panel_sel) %in% columns_to_prefix, paste0("MA_0_", names(df_panel_sel)), names(df_panel_sel))
+names(df_panel_sel) <- new_column_names
+names(df_panel_sel)[names(df_panel_sel) == "Cumulative.Response"] <- "Cumulative.Response.lagged_0"
+names(df_panel_sel)[names(df_panel_sel) == "Marginal.Response"] <- "Marginal.Response.lagged_0"
+names(df_panel_sel)
+```
+
+12. Take the log transform of all the inputs/outputs columns for elasticity predictors (excludes the inefficiency columns)
+
+```{r}
+columns_to_log <- c("Cumulative.Response.lagged_0","Cumulative.Response.lagged_1", 
+                    "Cumulative.Response.lagged_2","Cumulative.Response.lagged_3", 
+                    "Marginal.Response.lagged_0","Marginal.Response.lagged_1",
+                    "Marginal.Response.lagged_2", "Marginal.Response.lagged_3")
+
+prefixes <- c("MA_0_", "MA_1_", "MA_2_", "MA_3_")
+base_vars <- c("national_efficiency", "Mean_CRI.1", "Mean_HRI.1",
+                  "Mean_HRI.2", "Mean_HRI.3", "Mean_HRI.4","Mean_HRI.5",
+                  "Median_CRI.1", "Median_HRI.1", "Median_HRI.2",
+                  "Median_HRI.3", "Median_HRI.4", "Median_HRI.5","NormCOVIDBedsUse",
+                  "NormDoctorCOVIDDeployed", "NormNurseCOVIDDeployed","NormClinCOVIDDeployed",
+                  "NormEmergencyVolume", "NormElectiveVolume","NormSurgVolume")
+for(prefix in prefixes) {
+  new_columns <- paste0(prefix, base_vars)
+  columns_to_log <- c(columns_to_log, new_columns)
+}
+columns_to_log
+apply_log_transformation <- function(df, columns_to_log) {
+  for(col in columns_to_log) {
+    df[[paste0("log_", col)]] <- log(df[[col]] + 1e-9)
+  }
+  return(df)
+}
+
+df_panel_sel <- apply_log_transformation(df_panel_sel, columns_to_log)
+names(df_panel_sel)
+```
+
+13. Setup the 64 different combinations of experiments. Response is MLE, gamma, categories for coefficients defined as:
+0: No Significance; 1: Significant Positive; 2: Significant Negative; 3: Not included in model
+
+| Factor         | L1       | L2       |L3 |L4 |
+| -------------- | -------- | -------- | - | - |
+| Statistics     | Mean     | Median   |   |   |
+| MA             | 0        | 1        | 2 | 3 |
+| Response Lag   | 0        | 1        | 2 | 3 |
+| Response Type  | Cumulative| Marginal|   |   |
+| Clinician Type | Combined | Separate |   |   |
+
+
+```{r}
+statistics_levels <- c("Mean", "Median")
+ma_levels <- c(0, 1, 2, 3)
+response_lag_levels <- c(0, 1, 2, 3)
+clinician_type_levels <- c("Combined", "Separate")
+
+full_factorial_design <- expand.grid(Statistics = statistics_levels,
+                                     MA = ma_levels,
+                                     ResponseLag = response_lag_levels,
+                                     ClinicianType = clinician_type_levels)
+```
+
+```{r}
+base_elas_pred_vars <- c("CRI.1", "HRI.1",
+                  "HRI.2", "HRI.3", "HRI.4","HRI.5")
+                  
+base_ineff_vars_comb <- c("national_efficiency","NormCOVIDBedsUse",
+                  "NormClinCOVIDDeployed",
+                  "NormEmergencyVolume", "NormElectiveVolume")
+
+base_ineff_vars_sep <- c("national_efficiency","NormCOVIDBedsUse",
+                  "NormDoctorCOVIDDeployed", "NormNurseCOVIDDeployed",
+                  "NormEmergencyVolume", "NormElectiveVolume")
+
+# response_vars <- c("Cumulative.Response.lagged_0","Cumulative.Response.lagged_1", 
+#                     "Cumulative.Response.lagged_2","Cumulative.Response.lagged_3", 
+#                     "Marginal.Response.lagged_0","Marginal.Response.lagged_1",
+#                     "Marginal.Response.lagged_2", "Marginal.Response.lagged_3")
+```
+
+```{r}
+full_factorial_design <- full_factorial_design %>%
+  rowwise() %>%
+  mutate(elas_preds = list(paste0("log_MA_", MA, "_", Statistics, "_", base_elas_pred_vars)),
+         ineff_preds = if_else(ClinicianType == "Combined", 
+                               list(paste0("MA_", MA, "_", base_ineff_vars_comb)),
+                               list(paste0("MA_", MA, "_", base_ineff_vars_sep))),
+         response = paste0("Cumulative.Response.lagged_", ResponseLag))
+```
+
+# ```{r}
+# full_factorial_design$response[1]
+# full_factorial_design$elas_preds[[1]]
+# full_factorial_design$ineff_preds[[1]]
+# for (i in 1:min(nrow(full_factorial_design), 64)) { # Adjust the 5 to view more rows if needed
+#   cat("\nRow", i, "\n")
+#   cat("elas_preds:\n")
+#   print(full_factorial_design$elas_preds[[i]])
+#   cat("ineff_preds:\n")
+#   print(full_factorial_design$ineff_preds[[i]])
+#   cat("\n---------------------------------------\n")
+# }
+# ```
+
+
+```{r}
+full_factorial_design$MLL <- NA
+full_factorial_design$gamma <- NA
+full_factorial_design$Model <- vector("list", nrow(full_factorial_design))
+
+pdata <- pdata.frame(df_panel_sel, index = c("Name","Month.No"))
+
+for (i in 1:nrow(full_factorial_design)) {
+  full_formula <- as.formula(paste(full_factorial_design$response[i], 
+                                   "~", paste(full_factorial_design$elas_preds[[i]], collapse=" + "), 
+                                   "|", paste(full_factorial_design$ineff_preds[[i]], collapse=" + ")))
+  
+  pdata_sel <- pdata[, c("Name", "Month.No", full_factorial_design$elas_preds[[i]], full_factorial_design$ineff_preds[[i]], full_factorial_design$response[i])]
+  pdata_sel_clean <- na.omit(pdata_sel)
+  sfa_model <- sfa(full_formula, data = pdata_sel_clean)
+  
+  full_factorial_design$MLL[i] <- sfa_model$mleLogl
+  full_factorial_design$gamma[i] <-  sfa_model$mleParam[which(names(sfa_model$mleParam)=="gamma")]
+  full_factorial_design$Model[[i]] <- sfa_model
+}
+# names(full_factorial_design)
+# full_factorial_design$Model[[1]]$mleParam 
+# names(full_factorial_design$Model[[1]])
+# summary(full_factorial_design$Model[[1]])
+```
+
+
+
+```{r}
+mle_params_df <- data.frame(summary(full_factorial_design$Model[[2]],extraPar = TRUE)$mleParam)
+mle_params_df
+rownames_to_column(mle_params_df, var = "model.params")
+
+str(summary(full_factorial_design$Model[[1]],extraPar = TRUE)$mleParam)
+s <- summary(full_factorial_design$Model, extraPar = TRUE)
+print(s)
+str(sfa_model)
+sfa_model$mleParam[which(names(sfa_model$mleParam)=="gamma")]^2
+sfa_model$mleParam[which(names(sfa_model$mleParam)=="sigmaSq")]
+sfa_model$mleParam
+```
+
+
+Key for var_columns: 0: No Significance; 1: Significant Positive; 2: Significant Negative; 3: Not included in model
+
+1. Create columns for elasticity predictors
+
+```{r}
+for(var in base_elas_pred_vars) {
+  full_factorial_design[[var]] <- NA
+  full_factorial_design[[paste0(var, ".est")]] <- NA
+  full_factorial_design[[paste0(var, ".p")]] <- NA
+}
+
+for(i in 1:nrow(full_factorial_design)) {
+  temp_df <- data.frame(summary(full_factorial_design$Model[[i]])$mleParam)
+  temp_df <- rownames_to_column(temp_df, var = "model.params")
+  
+  for(var in base_elas_pred_vars) {
+    matching_rows <- which(grepl(var, temp_df$model.params))
+  
+    if(length(matching_rows) > 0) {
+      estimate <- temp_df$Estimate[matching_rows[1]]
+      pr_z <- temp_df$`Pr...z..`[matching_rows[1]]
+ 
+      full_factorial_design[i, paste0(var, ".est")] <- estimate
+      full_factorial_design[i, paste0(var, ".p")] <- pr_z
+
+      ######### TEST 0.01 instead of 0.001 as significant [changed 5/5/2024]           
+      if(estimate > 0 & pr_z < 0.01) {
+        full_factorial_design[i, var] <- 1
+      } else if(estimate < 0 & pr_z < 0.01) {
+        full_factorial_design[i, var] <- 2
+      } else if(pr_z >= 0.01) {
+        full_factorial_design[i, var] <- 0
+      } else {
+        full_factorial_design[i, var] <- 99
+      }
+    } else {
+      full_factorial_design[i, var] <- 3
+    }
+  }
+}
+```
+
+2. Create columns for inefficiency predictors
+
+```{r}
+base_ineff_vars <- c("national_efficiency","NormCOVIDBedsUse",
+                     "NormClinCOVIDDeployed",
+                     "NormDoctorCOVIDDeployed", "NormNurseCOVIDDeployed",
+                     "NormEmergencyVolume", "NormElectiveVolume")
+
+for(var in base_ineff_vars) {
+  full_factorial_design[[var]] <- NA
+  full_factorial_design[[paste0(var, ".est")]] <- NA
+  full_factorial_design[[paste0(var, ".p")]] <- NA
+}
+
+for(i in 1:nrow(full_factorial_design)) {
+  temp_df <- data.frame(summary(full_factorial_design$Model[[i]])$mleParam)
+  temp_df <- rownames_to_column(temp_df, var = "model.params")
+  
+  for(var in base_ineff_vars) {
+    matching_rows <- which(grepl(var, temp_df$model.params))
+  
+    if(length(matching_rows) > 0) {
+      estimate <- temp_df$Estimate[matching_rows[1]]
+      pr_z <- temp_df$`Pr...z..`[matching_rows[1]]
+
+      full_factorial_design[i, paste0(var, ".est")] <- estimate
+      full_factorial_design[i, paste0(var, ".p")] <- pr_z
+
+      ######### TEST 0.01 instead of 0.001 as significant [changed 5/5/2024]           
+
+      if(estimate > 0 & pr_z < 0.01) {
+        full_factorial_design[i, var] <- 1
+      } else if(estimate < 0 & pr_z < 0.01) {
+        full_factorial_design[i, var] <- 2
+      } else if(pr_z >= 0.01) {
+        full_factorial_design[i, var] <- 0
+      } else {
+        full_factorial_design[i, var] <- 99
+      }
+    } else {
+      full_factorial_design[i, var] <- 3
+    }
+  }
+}
+
+categorical_columns <- c("CRI.1", "HRI.1", "HRI.2", "HRI.3", "HRI.4", "HRI.5",
+                         "national_efficiency", "NormCOVIDBedsUse", "NormClinCOVIDDeployed",
+                         "NormDoctorCOVIDDeployed", "NormNurseCOVIDDeployed",
+                         "NormEmergencyVolume", "NormElectiveVolume")
+
+```
+
+
+
+```{r}
+ggplot(full_factorial_design, aes(x = gamma, y = MLL)) +
+  geom_point() + 
+  theme_minimal() + 
+  labs(x = "Gamma", y = "Maximum Likelihood (MLL)", 
+       title = "Scatter Plot of MLL vs Gamma") 
+```
+
+```{r}
+range(full_factorial_design$MLL)
+
+min_value = 10
+max_value = 300
+
+ggplot(full_factorial_design, aes(x = MLL)) +
+  geom_density(fill = "blue", alpha = 0.5) +
+  labs(title = "Kernel Density Estimate of Maximum Loglikelihood for all Experiments",
+       x = "MLL",
+       y = "Density") +
+  theme_minimal() +
+  scale_x_continuous(limits = c(min_value, max_value))  
+
+
+```
+
+
+CLUSTERING MLL and GAMMA
+```{r}
+library(factoextra)
+library(gridExtra)
+
+data_for_clustering <- full_factorial_design[, c("MLL", "gamma")]
+data_for_clustering_scaled <- scale(data_for_clustering)
+
+set.seed(123) 
+wss <- fviz_nbclust(data_for_clustering_scaled, kmeans, k.max = 12, method = "wss") + 
+            ggtitle("") + theme( 
+              plot.title = element_blank(),
+              axis.title.x = element_text(size = 10),  
+              axis.title.y = element_text(size = 10)  
+              )
+silhouette_values <- fviz_nbclust(data_for_clustering_scaled, kmeans, k.max = 12, method = "silhouette")+ 
+            ggtitle("") + theme(
+              plot.title = element_blank(),
+              axis.title.x = element_text(size = 10),  
+              axis.title.y = element_text(size = 10)  
+              )
+grid.arrange(wss, silhouette_values, nrow = 2)
+```
+```{r}
+set.seed(6)
+k3 <- kmeans(data_for_clustering_scaled, centers = 3)
+full_factorial_design$cluster.MLL.gamma <- as.factor(k3$cluster)
+# fviz_cluster(list(data = data_for_clustering_scaled, cluster = k3$cluster), geom = "point") +
+#   ggtitle("k = 3")
+
+fviz_cluster(list(data = data_for_clustering_scaled, cluster = k3$cluster), geom = "point",position = position_jitter(width = 0.2, height = 0.1), ellipse=FALSE) +
+  scale_shape_manual(values = c(1, 2, 3)) +  
+  scale_color_manual(values = c("black","black","black")) +
+  labs(title = "K-means Clustering for Gamma and MLL", x = "Scaled MLL", y = "Scaled Gamma") +
+  ggtitle("K-means Clustering for Gamma and MLL, k = 3") +
+  theme_minimal() +
+  theme(legend.position = "bottom") 
+
+full_factorial_design_flat <- full_factorial_design %>%
+  rowwise() %>%
+  mutate(elas_preds = paste(unlist(elas_preds), collapse=", "),
+         ineff_preds = paste(unlist(ineff_preds), collapse=", ")) %>%
+  ungroup() %>%
+  dplyr::select(-Model) 
+
+```
+
+RETAINING ONLY THE HIGH MLE CLUSTERS AND GAMMA <0.99 due to this 
+**Warning: the parameter 'gamma' is close to the boundary of the parameter space [0,1]: this can cause convergence problems and can negatively affect the validity and reliability of statistical tests and might be caused by model misspecification**
+
+```{r}
+filtered_full_factorial_design <- subset(full_factorial_design, 
+                                         (cluster.MLL.gamma == 2 | cluster.MLL.gamma == 3) & gamma <= 0.99)
+
+key_labels <- setNames(c("no.sig", "sig.pos", "sig.neg", "not.inc", "NA"),
+                       c("0", "1", "2", "3", "99"))
+
+for (col in categorical_columns) {
+  filtered_full_factorial_design[[col]] <- factor(filtered_full_factorial_design[[col]],
+                                                  levels = names(key_labels),
+                                                  labels = key_labels)
+}
+names(filtered_full_factorial_design)
+```
+
+```{r}
+range(filtered_full_factorial_design$MLL)
+
+gamma_plot <- ggplot(filtered_full_factorial_design, aes(x = gamma)) +
+  geom_density(fill = "blue", alpha = 0.5) +
+  labs(title = "Kernel Density Estimate of Gamma", x = "Gamma", y = "Kernel Density") +
+  theme_minimal()
+mll_plot <- ggplot(filtered_full_factorial_design, aes(x = MLL)) +
+  geom_density(fill = "red", alpha = 0.5) +
+  labs(title = "Kernel Density Estimate of MLL", x = "MLL", y = "Kernel Density") +
+  theme_minimal()
+
+grid.arrange(gamma_plot, mll_plot, ncol = 1)
+
+```
+
+```{r}
+
+filtered_full_factorial_design$MLL_transformed <- rescale(filtered_full_factorial_design$MLL, to = c(3, 4), from = range(filtered_full_factorial_design$MLL, na.rm = TRUE))
+
+MLL_min <- min(filtered_full_factorial_design$MLL, na.rm = TRUE)
+MLL_max <- max(filtered_full_factorial_design$MLL, na.rm = TRUE)
+
+ggplot(filtered_full_factorial_design, aes(x = gamma)) +
+  geom_density(fill = "gray80", alpha = 1) +
+  geom_point(aes(y = MLL_transformed, shape = as.factor(cluster.MLL.gamma)), 
+             position = position_jitter(width = 0, height = 0.01),
+             size=2, alpha = 0.5) + 
+  scale_y_continuous(
+    name = "Density",
+    limits = c(0, 4),
+    sec.axis = sec_axis(~ (. - 3) * (MLL_max - MLL_min) + MLL_min, name = "MLL")
+  ) +
+  scale_shape_manual(values=c(1, 4)) + 
+  labs(shape = "Cluster") +
+  labs(title = "Overlay of Gamma Density and MLL", x = "Gamma") +
+  theme_minimal(base_size = 14)+
+  theme(legend.position = "bottom") 
+
+```
+
+# PLOT DISTRIBUTION OF ESTIMATES FOR COVARIATES
+
+```{r}
+est_columns <- paste0(categorical_columns, ".est")
+columns_to_include <- c("Statistics","MA","ResponseLag","ClinicianType",
+                        "MLL", "gamma", est_columns, categorical_columns)
+filtered_temp<-filtered_full_factorial_design[,columns_to_include]
+
+plot_list <- list()
+
+for (i in 1:length(est_columns)) {
+  col_name <- est_columns[i]
+  x_min <- min(filtered_temp[[col_name]], na.rm = TRUE) - (sd(filtered_temp[[col_name]], na.rm = TRUE) * 3)
+  x_max <- max(filtered_temp[[col_name]], na.rm = TRUE) + (sd(filtered_temp[[col_name]], na.rm = TRUE) * 3)
+  
+  plot <- ggplot(filtered_temp, aes_string(x = col_name)) + 
+          geom_density(fill = "blue", alpha = 0.5, na.rm=TRUE, adjust=5) +  # Using geom_density for density plots
+          theme_minimal(base_size = 6) + 
+          labs(title = col_name, x = NULL, y = "Density") +
+          theme(axis.text.x = element_text(angle = 45, hjust = 1),
+                plot.title = element_text(size = rel(1.2))) +
+          xlim(x_min, x_max)
+  plot_list[[i]] <- plot
+}
+
+do.call("grid.arrange", c(plot_list, ncol = 3, top = "Density of Estimates"))
+```
+
+# Summarize results for estimates and direction of effects
+
+```{r}
+kde_results_df <- data.frame(Name = character(),
+                         mean = numeric(),
+                         sd=numeric(),
+                         stringsAsFactors = FALSE)
+for (col_name in est_columns) {
+  data_vector <- na.omit(filtered_temp[[col_name]])  # Remove NA values
+  mean_value <- mean(data_vector)
+  sd_value <- sd(data_vector)
+  kde_results_df <- rbind(kde_results_df, data.frame(Name = col_name, 
+                                             mean = mean_value, sd = sd_value))
+}
+
+list_of_freq_dfs <- list()
+categorical_columns
+
+for(col_name in categorical_columns) {
+  freq_df <- filtered_temp %>%
+    count(!!sym(col_name)) %>%
+    rename(Category = !!sym(col_name), Count = n) %>%
+    mutate(Name = col_name) %>%
+    dplyr::select(Name, Category, Count)
+  
+  list_of_freq_dfs[[col_name]] <- freq_df
+}
+combined_freq_df <- bind_rows(list_of_freq_dfs)
+combined_freq_df_wide <- pivot_wider(combined_freq_df, 
+                        names_from = Category, 
+                        values_from = Count,
+                        values_fill = list(Count = 0)) 
+combined_freq_df_wide <- combined_freq_df_wide %>%
+  rowwise() %>%
+  mutate(Total = sum(c_across(where(is.numeric)), na.rm = TRUE)) %>%
+  ungroup()
+kde_results_df$Name <- gsub(".est", "", kde_results_df$Name, fixed = TRUE)
+merged_kde_freq_df <- left_join(kde_results_df, combined_freq_df_wide, by = "Name")
+
+output_file_path <- file.path(output_data_path, "Filtered_Estimates.csv")
+write.csv(merged_kde_freq_df, output_file_path)
+
+```
+
+```{r}
+columns_to_include <- c("Statistics","MA","ResponseLag","ClinicianType",
+                        "MLL", "gamma", categorical_columns)
+filtered_temp<-filtered_full_factorial_design[,columns_to_include]
+
+plot_list <- list()
+
+for (i in 1:length(categorical_columns)) {
+  col_name <- categorical_columns[i]
+  plot <- ggplot(filtered_temp, aes_string(x = col_name)) + 
+          geom_bar() + 
+          theme_minimal(base_size=6) + 
+          labs(title = col_name, x = NULL, y = "Count") +
+          theme(axis.text.x = element_text(angle = 45, hjust = 1),
+                plot.title = element_text(size = rel(1.2)))  
+  plot_list[[i]] <- plot
+}
+
+do.call("grid.arrange", c(plot_list, ncol = 3, top = "Direction of Effects"))
+
+```
+# Analysis of lags in 36 runs
+
+```{r}
+ggplot(filtered_temp, aes(x=MA)) + 
+  geom_histogram(binwidth = 0.5, fill="skyblue", color="black") + 
+  theme_minimal() + 
+  labs(title="Histogram of MA (Moving Average)", x="MA Values", y="Frequency")
+
+ggplot(filtered_temp, aes(x=ResponseLag)) + 
+  geom_histogram(binwidth = 1, fill="lightgreen", color="black") + 
+  theme_minimal() + 
+  labs(title="Histogram of ResponseLag", x="ResponseLag Values", y="Frequency")
+
+```
+
+```{r}
+tables_list <- list()
+
+for (col in names(filtered_temp)[c(7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19)]) {
+  tab <- table(filtered_temp[[col]],useNA="no")
+  df <- as.data.frame(tab)
+  df$Variable <- col
+  colnames(df)[1] <- "Level"
+  colnames(df)[2] <- "Count"
+  tables_list[[col]] <- df
+}
+filtered_summary_df <- bind_rows(tables_list)
+filtered_summary_df <- pivot_wider(filtered_summary_df, names_from = Level, values_from = Count, id_cols = Variable) %>% dplyr::select (-"NA")
+
+
+```
+
+
+# (a) Cluster 3 (low gamma)
+
+```{r}
+columns_to_include <- c("Statistics","MA","ResponseLag","ClinicianType",
+                        "MLL", "gamma", est_columns, categorical_columns)
+filtered_temp_low <- filtered_full_factorial_design %>%
+  filter(cluster.MLL.gamma == 3) %>%
+  dplyr::select(all_of(columns_to_include))
+
+for (i in 1:length(est_columns)) {
+  col_name <- est_columns[i]
+  x_min <- min(filtered_temp_low[[col_name]], na.rm = TRUE) - (sd(filtered_temp_low[[col_name]], na.rm = TRUE) * 3)
+  x_max <- max(filtered_temp_low[[col_name]], na.rm = TRUE) + (sd(filtered_temp_low[[col_name]], na.rm = TRUE) * 3)
+  
+  plot <- ggplot(filtered_temp_low, aes_string(x = col_name)) + 
+          geom_density(fill = "blue", alpha = 0.5, na.rm=TRUE, adjust=5) +  # Using geom_density for density plots
+          theme_minimal(base_size = 6) + 
+          labs(title = col_name, x = NULL, y = "Density") +
+          theme(axis.text.x = element_text(angle = 45, hjust = 1),
+                plot.title = element_text(size = rel(1.2))) +
+          xlim(x_min, x_max)
+  plot_list[[i]] <- plot
+}
+
+do.call("grid.arrange", c(plot_list, ncol = 3, top = "Density of Estimates (Low Gamma)"))
+
+```
+
+```{r}
+
+kde_results_df <- data.frame(Name = character(),
+                         mean = numeric(),
+                         sd=numeric(),
+                         stringsAsFactors = FALSE)
+for (col_name in est_columns) {
+  data_vector <- na.omit(filtered_temp_low[[col_name]])  # Remove NA values
+  mean_value <- mean(data_vector)
+  sd_value <- sd(data_vector)
+  kde_results_df <- rbind(kde_results_df, data.frame(Name = col_name, 
+                                             mean = mean_value, sd = sd_value))
+}
+
+list_of_freq_dfs <- list()
+
+for(col_name in categorical_columns) {
+  freq_df <- filtered_temp_low %>%
+    count(!!sym(col_name)) %>%
+    rename(Category = !!sym(col_name), Count = n) %>%
+    mutate(Name = col_name) %>%
+    dplyr::select(Name, Category, Count)
+  
+  list_of_freq_dfs[[col_name]] <- freq_df
+}
+combined_freq_df <- bind_rows(list_of_freq_dfs)
+combined_freq_df_wide <- pivot_wider(combined_freq_df, 
+                        names_from = Category, 
+                        values_from = Count,
+                        values_fill = list(Count = 0)) 
+combined_freq_df_wide <- combined_freq_df_wide %>%
+  rowwise() %>%
+  mutate(Total = sum(c_across(where(is.numeric)), na.rm = TRUE)) %>%
+  ungroup()
+kde_results_df$Name <- gsub(".est", "", kde_results_df$Name, fixed = TRUE)
+merged_kde_freq_df <- left_join(kde_results_df, combined_freq_df_wide, by = "Name")
+
+output_file_path <- file.path(output_data_path, "Filtered_Estimates_Low_Gamma_20102025.csv")
+write.csv(merged_kde_freq_df, output_file_path)
+```
+
+
+
+```{r}
+plot_list <- list()
+
+for (i in 1:length(categorical_columns)) {
+  col_name <- categorical_columns[i]
+  plot <- ggplot(filtered_temp_low, aes_string(x = col_name)) + 
+          geom_bar() + 
+          theme_minimal(base_size=6) + 
+          labs(title = col_name, x = NULL, y = "Count") +
+          theme(axis.text.x = element_text(angle = 45, hjust = 1),
+                plot.title = element_text(size = rel(1.2)))  
+  plot_list[[i]] <- plot
+}
+
+do.call("grid.arrange", c(plot_list, ncol = 3, top = "Direction of Effects(Low Gamma)"))
+mean_gamma <- mean(filtered_temp_low$gamma, na.rm = TRUE)
+gamma_summary <- with(filtered_temp_low, c(
+  Min = min(gamma, na.rm = TRUE),
+  "1st Quartile" = quantile(gamma, probs = 0.25, na.rm = TRUE),
+  Median = median(gamma, na.rm = TRUE),
+  Mean = mean(gamma, na.rm = TRUE),
+  "3rd Quartile" = quantile(gamma, probs = 0.75, na.rm = TRUE),
+  Max = max(gamma, na.rm = TRUE),
+  SD = sd(gamma, na.rm = TRUE),
+  Variance = var(gamma, na.rm = TRUE)
+))
+
+gamma_summary_df <- as.data.frame(gamma_summary)
+names(gamma_summary_df) <- c("Value")
+gamma_summary_df$Statistic <- row.names(gamma_summary_df)
+rownames(gamma_summary_df) <- NULL
+gamma_summary_df <- gamma_summary_df[c("Statistic", "Value")]
+
+output_file_path <- file.path(output_data_path, "Gamma_summary_Low_Gamma_20102025.csv")
+write.csv(gamma_summary_df, output_file_path)
+```
+
+## (b) Cluster 2 (high gamma)
+```{r}
+columns_to_include <- c("Statistics","MA","ResponseLag","ClinicianType",
+                        "MLL", "gamma", est_columns, categorical_columns)
+filtered_temp_high <- filtered_full_factorial_design %>%
+  filter(cluster.MLL.gamma == 2) %>%
+  dplyr::select(all_of(columns_to_include))
+
+for (i in 1:length(est_columns)) {
+  col_name <- est_columns[i]
+  x_min <- min(filtered_temp_high[[col_name]], na.rm = TRUE) - (sd(filtered_temp_high[[col_name]], na.rm = TRUE) * 3)
+  x_max <- max(filtered_temp_high[[col_name]], na.rm = TRUE) + (sd(filtered_temp_high[[col_name]], na.rm = TRUE) * 3)
+  
+  plot <- ggplot(filtered_temp_high, aes_string(x = col_name)) + 
+          geom_density(fill = "blue", alpha = 0.5, na.rm=TRUE, adjust=5) +
+          theme_minimal(base_size = 6) + 
+          labs(title = col_name, x = NULL, y = "Density") +
+          theme(axis.text.x = element_text(angle = 45, hjust = 1),
+                plot.title = element_text(size = rel(1.2))) +
+          xlim(x_min, x_max)
+  plot_list[[i]] <- plot
+}
+
+do.call("grid.arrange", c(plot_list, ncol = 3, top = "Density of Estimates (High Gamma)"))
+```
+
+```{r}
+plot_list <- list()
+
+for (i in 1:length(categorical_columns)) {
+  col_name <- categorical_columns[i]
+  plot <- ggplot(filtered_temp_high, aes_string(x = col_name)) + 
+          geom_bar() + 
+          theme_minimal(base_size=6) + 
+          labs(title = col_name, x = NULL, y = "Count") +
+          theme(axis.text.x = element_text(angle = 45, hjust = 1),
+                plot.title = element_text(size = rel(1.2)))  
+  plot_list[[i]] <- plot
+}
+
+do.call("grid.arrange", c(plot_list, ncol = 3, top = "Direction of Effects(High Gamma)"))
+mean_gamma <- mean(filtered_temp_high$gamma, na.rm = TRUE)
+gamma_summary <- with(filtered_temp_high, c(
+  Min = min(gamma, na.rm = TRUE),
+  "1st Quartile" = quantile(gamma, probs = 0.25, na.rm = TRUE),
+  Median = median(gamma, na.rm = TRUE),
+  Mean = mean(gamma, na.rm = TRUE),
+  "3rd Quartile" = quantile(gamma, probs = 0.75, na.rm = TRUE),
+  Max = max(gamma, na.rm = TRUE),
+  SD = sd(gamma, na.rm = TRUE),
+  Variance = var(gamma, na.rm = TRUE)
+))
+
+gamma_summary_df <- as.data.frame(gamma_summary)
+names(gamma_summary_df) <- c("Value")
+gamma_summary_df$Statistic <- row.names(gamma_summary_df)
+rownames(gamma_summary_df) <- NULL
+gamma_summary_df <- gamma_summary_df[c("Statistic", "Value")]
+
+output_file_path <- file.path(output_data_path, "Gamma_summary_High_Gamma_20102025.csv")
+write.csv(gamma_summary_df, output_file_path)
+```
+
+```{r}
+kde_results_df <- data.frame(Name = character(),
+                         mean = numeric(),
+                         sd=numeric(),
+                         stringsAsFactors = FALSE)
+for (col_name in est_columns) {
+  data_vector <- na.omit(filtered_temp_high[[col_name]])  # Remove NA values
+  mean_value <- mean(data_vector)
+  sd_value <- sd(data_vector)
+  kde_results_df <- rbind(kde_results_df, data.frame(Name = col_name, 
+                                             mean = mean_value, sd = sd_value))
+}
+
+list_of_freq_dfs <- list()
+
+for(col_name in categorical_columns) {
+  freq_df <- filtered_temp_high %>%
+    count(!!sym(col_name)) %>%
+    rename(Category = !!sym(col_name), Count = n) %>%
+    mutate(Name = col_name) %>%
+    dplyr::select(Name, Category, Count)
+  
+  list_of_freq_dfs[[col_name]] <- freq_df
+}
+combined_freq_df <- bind_rows(list_of_freq_dfs)
+combined_freq_df_wide <- pivot_wider(combined_freq_df, 
+                        names_from = Category, 
+                        values_from = Count,
+                        values_fill = list(Count = 0)) 
+combined_freq_df_wide <- combined_freq_df_wide %>%
+  rowwise() %>%
+  mutate(Total = sum(c_across(where(is.numeric)), na.rm = TRUE)) %>%
+  ungroup()
+kde_results_df$Name <- gsub(".est", "", kde_results_df$Name, fixed = TRUE)
+merged_kde_freq_df <- left_join(kde_results_df, combined_freq_df_wide, by = "Name")
+
+output_file_path <- file.path(output_data_path, "Filtered_Estimates_High_Gamma_20102025.csv")
+write.csv(merged_kde_freq_df, output_file_path)
+```
+
+# Plot boxplot of gammas across low, high and all
+
+```{r}
+filtered_temp_high$Group <- "High"
+filtered_temp_low$Group <- "Low"
+
+combined_df <- bind_rows(filtered_temp_high, filtered_temp_low)
+box_gamma <- ggplot(combined_df, aes(x = Group, y = gamma, fill = Group)) +
+  geom_boxplot() +
+  scale_fill_manual(values = c("High" = "gray80", "Low" = "gray50")) +
+  labs(title = "Gamma Distribution Across Groups", x = "Group", y = "Gamma") +
+  theme_minimal() +
+  theme(legend.position = "none")  
+
+box_mll <- ggplot(combined_df, aes(x = Group, y = MLL, fill = Group)) +
+  geom_boxplot() +
+  scale_fill_manual(values = c("High" = "gray80", "Low" = "gray50")) +
+  labs(title = "MLL Distribution Across Groups", x = "Group", y = "Max Loglikelihood") +
+  theme_minimal() +
+  theme(legend.position = "none")  
+
+grid.arrange(box_gamma, box_mll, ncol = 2)
+```
+
+# Extract the number of lags counted for each cluster
+
+```{r}
+contingency_table <- table(filtered_temp_high$MA, filtered_temp_high$ResponseLag)
+fisher_result_high <- fisher.test(contingency_table)
+fisher_result_high
+
+contingency_table_margins <- addmargins(contingency_table)
+contingency_df_counts <- as.data.frame.matrix(contingency_table_margins)
+rownames(contingency_df_counts) <- paste("MA", rownames(contingency_df_counts))
+colnames(contingency_df_counts) <- paste("ResponseLag", colnames(contingency_df_counts))
+
+contingency_table_props <- prop.table(contingency_table)
+contingency_table_props_margins <- addmargins(contingency_table_props)
+contingency_df_props <- as.data.frame.matrix(contingency_table_props_margins)
+rownames(contingency_df_props) <- paste("MA", rownames(contingency_df_props))
+colnames(contingency_df_props) <- paste("ResponseLag", colnames(contingency_df_props))
+
+combined_df <- rbind(contingency_df_counts, contingency_df_props)
+
+output_file_path <- file.path(output_data_path, "Response_MA_lags_high_gamma.csv_20102025")
+write.csv(combined_df, output_file_path)
+```
+
+```{r}
+contingency_table <- table(filtered_temp_low$MA, filtered_temp_low$ResponseLag)
+fisher_result_low <- fisher.test(contingency_table)
+fisher_result_low
+
+contingency_table_margins <- addmargins(contingency_table)
+contingency_df_counts <- as.data.frame.matrix(contingency_table_margins)
+rownames(contingency_df_counts) <- paste("MA", rownames(contingency_df_counts))
+colnames(contingency_df_counts) <- paste("ResponseLag", colnames(contingency_df_counts))
+
+contingency_table_props <- prop.table(contingency_table)
+contingency_table_props_margins <- addmargins(contingency_table_props)
+contingency_df_props <- as.data.frame.matrix(contingency_table_props_margins)
+rownames(contingency_df_props) <- paste("MA", rownames(contingency_df_props))
+colnames(contingency_df_props) <- paste("ResponseLag", colnames(contingency_df_props))
+
+combined_df <- rbind(contingency_df_counts, contingency_df_props)
+
+output_file_path <- file.path(output_data_path, "Response_MA_lags_low_gamma.csv_20102025")
+write.csv(combined_df, output_file_path)
+```
+
+```{r}
+contingency_table <- table(filtered_temp$MA, filtered_temp$ResponseLag)
+fisher_result_all <- fisher.test(contingency_table)
+fisher_result_all
+
+contingency_table_margins <- addmargins(contingency_table)
+contingency_df_counts <- as.data.frame.matrix(contingency_table_margins)
+rownames(contingency_df_counts) <- paste("MA", rownames(contingency_df_counts))
+colnames(contingency_df_counts) <- paste("ResponseLag", colnames(contingency_df_counts))
+
+contingency_table_props <- prop.table(contingency_table)
+contingency_table_props_margins <- addmargins(contingency_table_props)
+contingency_df_props <- as.data.frame.matrix(contingency_table_props_margins)
+rownames(contingency_df_props) <- paste("MA", rownames(contingency_df_props))
+colnames(contingency_df_props) <- paste("ResponseLag", colnames(contingency_df_props))
+
+combined_df <- rbind(contingency_df_counts, contingency_df_props)
+
+output_file_path <- file.path(output_data_path, "Response_MA_lags_all_gamma_20102025.csv")
+write.csv(combined_df, output_file_path)
+```
+
+
+
+# Extract efficiencies from each Model for all Institutions with good LR (36 runs) in a list
+
+```{r}
+all_df_long_reference <- data.frame()
+
+for (i in 1:length(filtered_full_factorial_design$Model)) {
+  df <- as.data.frame(efficiencies(filtered_full_factorial_design$Model[[i]]))
+  df$Institution <- rownames(df)
+  
+  df_long <- pivot_longer(df, 
+                          cols = -Institution, 
+                          names_to = "Month", 
+                          values_to = "Efficiency")
+  
+  ID_col <- paste("Experiment:", i,
+                  "Statistics:", filtered_full_factorial_design$Statistics[[i]], 
+                  "MA:", filtered_full_factorial_design$MA[[i]], 
+                  "ResponseLag:", filtered_full_factorial_design$ResponseLag[[i]],
+                  filtered_full_factorial_design$ClinicianType[[i]],
+                  sep = ": ")
+  
+  df_long$Experiment.Run <- ID_col
+  all_df_long_reference <- rbind(all_df_long_reference, df_long)
+}
+
+output_file_path <- file.path(output_data_path, "Efficiencies_goodLR_36runs_20102025.csv")
+write.csv(all_df_long_reference, output_file_path)
+```
+
+```{r}
+names(all_df_long_reference)
+ggplot(all_df_long_reference, aes(x = Institution, y = Efficiency)) +
+  geom_boxplot() +
+  labs(x = "Institution", y = "Efficiency") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+ggplot(all_df_long_reference, aes(x = Efficiency, fill = Institution)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap(~ Institution, scales = "free") +
+  labs(x = "Efficiency", y = "Density") +
+  theme_minimal()
+
+```
+
+```{r}
+
+all_df_long_reference$Month <- factor(all_df_long_reference$Month, levels = 1:18, ordered = TRUE)
+
+mean_efficiency <- all_df_long_reference %>%
+  group_by(Institution, Month) %>%
+  summarise(mean_Efficiency = mean(Efficiency))
+
+last_points <- mean_efficiency %>%
+  group_by(Institution) %>%
+  filter(Institution %in% c("USU", "RIMS", "ULin", "GNRC")) %>%  
+  filter(Month == max(Month)) %>%
+  ungroup()
+
+line_types <- c("solid", "dashed", "dotdash", "dotted", "longdash", "twodash", "dotdash", "dashed")
+
+ggplot(mean_efficiency, aes(x = Month, y = mean_Efficiency, linetype = Institution, group = Institution)) +
+  geom_line() +
+  labs(x = "Month", y = "Mean Efficiency") +
+  scale_linetype_manual(values = line_types) + 
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  geom_text(data = last_points, aes(label = Institution, hjust = 1.1, vjust=1.4), check_overlap = TRUE) 
+
+```
+
+
+
+
+# Extract efficiencies from each Model for all Institutions for all runs in a list
+
+```{r}
+all_df_long <- data.frame()
+
+for (i in 1:length(full_factorial_design$Model)) {
+  df <- as.data.frame(efficiencies(full_factorial_design$Model[[i]]))
+  df$Institution <- rownames(df)
+  
+  df_long <- pivot_longer(df, 
+                          cols = -Institution, 
+                          names_to = "Month", 
+                          values_to = "Efficiency")
+  
+  ID_col <- paste("Experiment:", i,
+                  "Statistics:", full_factorial_design$Statistics[[i]], 
+                  "MA:", full_factorial_design$MA[[i]], 
+                  "ResponseLag:", full_factorial_design$ResponseLag[[i]],
+                  full_factorial_design$ClinicianType[[i]],
+                  sep = ": ")
+  
+  df_long$Experiment.Run <- ID_col
+  all_df_long <- rbind(all_df_long, df_long)
+}
+
+output_file_path <- file.path(output_data_path, "Efficiencies_all_64runs_20102025.csv")
+write.csv(all_df_long, output_file_path)
+```
+

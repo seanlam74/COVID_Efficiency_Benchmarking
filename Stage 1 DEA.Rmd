@@ -1,0 +1,75 @@
+---
+title: "Stage 1 DEA"
+author: "Ge Yao"
+date: "2024-10-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(readxl)
+library(Benchmarking)
+library(dplyr)
+library(tidyr)
+df <- read_excel('D:/esther/Documents/nBox/Global Surgery-WS4/4. National Level Study/GY national level analysis/Updated national level study/SFA paper/Stage 1 Data.xlsx', sheet = 'Sheet1')
+
+input_columns <- c('Index','IHRCC','Area_per_individual')
+output_columns = c('New_cases','New_deaths')
+whole <- c('Country','Date','Index','IHRCCS','Area_per_individual','gdp_per_capita_N', 'New_cases','New_deaths')
+
+selected_inst <- c('India', 'Indonesia', 'Malaysia', 'Pakistan', 'Singapore')
+df_data <- df[df$Country %in% selected_inst, ]
+df_data <- df_data[,whole]
+df_data <- df_data[df_data$Date < '2021-07-31', ]
+df_data$New_cases_1000 <- df_data$New_cases/1000
+df_data$New_deaths_10000 <- df_data$New_deaths/10000
+df_data[df_data$Country == 'Singapore', 'New_deaths']
+
+cols_to_pivot <- c('Index','IHRCCS','Area_per_individual','gdp_per_capita_N', 'New_cases_1000','New_deaths_10000')
+
+df_data_long <- reshape2::melt(df_data, id.vars = c("Country", "Date"), 
+                   measure.vars = cols_to_pivot, 
+                   variable.name = 'Feature', 
+                   value.name = 'Value')
+
+q1 <- function(x) { quantile(x, 0.25, na.rm = TRUE) }
+q3 <- function(x) { quantile(x, 0.75, na.rm = TRUE) }
+
+df_data_wide_total <- df_data_long %>%
+  group_by(Feature) %>%
+  summarise(N = n(),
+            Mean = mean(Value, na.rm = TRUE),
+            SD = sd(Value, na.rm = TRUE),
+            Median = median(Value, na.rm = TRUE),
+            IQR =  q3(Value)- q1(Value))
+
+df_data_wide <- df_data_long %>%
+  group_by(Country, Feature) %>%
+  summarise(N = n(),
+            Mean = mean(Value, na.rm = TRUE),
+            SD = sd(Value, na.rm = TRUE),
+            Median = median(Value, na.rm = TRUE),
+            IQR =  q3(Value)- q1(Value))
+
+write.csv(df_data_wide, "D:/esther/Documents/nBox/Global Surgery-WS4/5. Hospital Level Study/SFA/7. Data summary/Stage1_data.csv", row.names=FALSE)
+write.csv(df_data_wide_total, "D:/esther/Documents/nBox/Global Surgery-WS4/5. Hospital Level Study/SFA/7. Data summary/Stage1_data_total.csv", row.names=FALSE)
+```
+
+```{r}
+unique(df$Date)[1]
+month_data <- df[df$Date == unique(df$Date)[1],]
+input_data <- as.matrix(month_data[,input_columns])
+input_data
+output_data <- as.matrix(month_data[,output_columns])
+output_data
+e <- dea(input_data, output_data, RTS = 'crs', ORIENTATION = 'in', SLACK = TRUE)
+e$eff
+
+sl <- slack(input_data, output_data, e)
+result <- data.frame(e$eff,sl$slack,sl$sx,sl$sy)
+result <- cbind(result, month_data)
+result  
+```
