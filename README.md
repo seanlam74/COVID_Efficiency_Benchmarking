@@ -41,23 +41,6 @@ The 2-FB framework integrates **deterministic** and **stochastic** efficiency mo
 
 ---
 
-## 🧩 Dependencies
-
-Install required packages with:
-
-```bash
-pip install -r requirements.txt
-```
-
-Key dependencies include:
-- `numpy`
-- `pandas`
-- `pyDEA` or `pyomo` (for DEA)
-- `frontierpy` or `statsmodels` (for SFA)
-- `matplotlib`, `seaborn` (for visualization)
-
----
-
 ## 🧾 Citation
 
 If you use this repository or adapt the 2-FB framework, please cite the following study:
